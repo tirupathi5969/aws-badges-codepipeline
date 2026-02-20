@@ -1,42 +1,27 @@
 AWSTemplateFormatVersion: 2010-09-09
 Description: The AWS CloudFormation template for this Serverless application
 Parameters:
-    Stage:
-        Description: 'Envrionment/Stage, such as: dev, staging, prod'
-        Type: String
-        Default: 'prod'
-        AllowedValues:
-            - 'dev'
-            - 'staging'
-            - 'prod'
+    # No-op section removed
     AppName:
         Type: String
-        Default: 'my-app'
-    CodeBuildProjectsNames:
-        Description: 'CodeBuild project names names to watch, comma separated'
-        Type: CommaDelimitedList
-        Default: 'my-app-codebuild,'
-    CodePipelineNames:
-        Description: 'CodePipeline names to watch, comma separated'
-        Type: CommaDelimitedList
-        Default: 'my-app-codepipeline,'
+        Default: "dx-aws-pipeline-badges"
 Resources:
     LambdaZipsBucket:
         Type: AWS::S3::Bucket
 
     # Log Groups
     StatusBadgeLogGroup:
-        Type: 'AWS::Logs::LogGroup'
+        Type: "AWS::Logs::LogGroup"
         Properties:
-            LogGroupName: !Sub '/aws/lambda/${AppName}-badges-${Stage}-statusBadge'
+            LogGroupName: !Sub "/aws/lambda/${AppName}-status"
     CommitIdBadgeLogGroup:
-        Type: 'AWS::Logs::LogGroup'
+        Type: "AWS::Logs::LogGroup"
         Properties:
-            LogGroupName: !Sub '/aws/lambda/${AppName}-badges-${Stage}-commitIdBadge'
+            LogGroupName: !Sub "/aws/lambda/${AppName}-commit-id"
 
     # Roles
     IamRoleLambdaExecution:
-        Type: 'AWS::IAM::Role'
+        Type: "AWS::IAM::Role"
         Properties:
             AssumeRolePolicyDocument:
                 Version: 2012-10-17
@@ -46,49 +31,43 @@ Resources:
                           Service:
                               - lambda.amazonaws.com
                       Action:
-                          - 'sts:AssumeRole'
+                          - "sts:AssumeRole"
             Policies:
-                - PolicyName: !Join
-                      - '-'
-                      - - !Sub '${Stage}'
-                        - !Sub '${AppName}-badges'
-                        - lambda
+                - PolicyName: !Sub "${AppName}-lambda-policy"
                   PolicyDocument:
                       Version: 2012-10-17
                       Statement:
                           - Effect: Allow
                             Action:
-                                - 'logs:CreateLogStream'
+                                - "logs:CreateLogStream"
                             Resource:
                                 - !Sub >-
-                                    arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AppName}-badges-${Stage}*:*
+                                    arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AppName}*:*
                           - Effect: Allow
                             Action:
-                                - 'logs:PutLogEvents'
+                                - "logs:PutLogEvents"
                             Resource:
                                 - !Sub >-
-                                    arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AppName}-badges-${Stage}*:*:*
+                                    arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AppName}*:*:*
                           - Effect: Allow
                             Action:
-                                - 's3:PutObject'
-                                - 's3:PutObjectAcl'
-                            Resource: !Sub 'arn:aws:s3:::${AppName}-badges-images-${Stage}/*'
+                                - "s3:PutObject"
+                                - "s3:PutObjectAcl"
+                            Resource: !Sub "arn:aws:s3:::${AppName}-images/*"
                           - Effect: Allow
                             Action:
-                                - 'logs:CreateLogGroup'
-                                - 'logs:CreateLogStream'
-                                - 'logs:PutLogEvents'
-                            Resource: 'arn:aws:logs:*:*:*'
+                                - "logs:CreateLogGroup"
+                                - "logs:CreateLogStream"
+                                - "logs:PutLogEvents"
+                            Resource: "arn:aws:logs:*:*:*"
             Path: /
             RoleName: !Join
-                - '-'
-                - - !Sub '${AppName}-badges'
-                  - !Sub '${Stage}'
-                  - !Ref 'AWS::Region'
-                  - lambdaRole
+                - "-"
+                - - !Sub "${AppName}-lambda-role"
+                  - !Ref "AWS::Region"
 
     CommitIdFunctionRole:
-        Type: 'AWS::IAM::Role'
+        Type: "AWS::IAM::Role"
         Properties:
             AssumeRolePolicyDocument:
                 Version: 2012-10-17
@@ -97,7 +76,7 @@ Resources:
                       Principal:
                           Service:
                               - lambda.amazonaws.com
-                      Action: 'sts:AssumeRole'
+                      Action: "sts:AssumeRole"
             Policies:
                 - PolicyName: CommitIdFunctionRolePolicy
                   PolicyDocument:
@@ -105,151 +84,148 @@ Resources:
                       Statement:
                           - Effect: Allow
                             Action:
-                                - 'logs:CreateLogGroup'
-                                - 'logs:CreateLogStream'
-                                - 'logs:PutLogEvents'
+                                - "logs:CreateLogGroup"
+                                - "logs:CreateLogStream"
+                                - "logs:PutLogEvents"
                             Resource:
-                                - 'arn:aws:logs:*:*:*'
+                                - "arn:aws:logs:*:*:*"
                           - Effect: Allow
                             Action:
-                                - 'codepipeline:GetPipelineExecution'
+                                - "codepipeline:GetPipelineExecution"
+                                - "codepipeline:ListActionExecutions"
                             Resource:
-                                - '*'
+                                - "*"
                           - Effect: Allow
                             Action:
-                                - 's3:PutObject'
-                                - 's3:PutObjectAcl'
-                            Resource: !Sub 'arn:aws:s3:::${AppName}-badges-images-${Stage}/*'
+                                - "s3:PutObject"
+                                - "s3:PutObjectAcl"
+                            Resource: !Sub "arn:aws:s3:::${AppName}-images/*"
 
     # Functions
     StatusBadgeLambdaFunction:
         DependsOn:
             - CopyZips
             - StatusBadgeLogGroup
-            - IamRoleLambdaExecution
-        Type: 'AWS::Lambda::Function'
+        Type: "AWS::Lambda::Function"
         Properties:
             Code:
-                S3Bucket: !Ref 'LambdaZipsBucket'
+                S3Bucket: !Ref "LambdaZipsBucket"
                 S3Key: dist_status_badges.zip
-            FunctionName: !Sub '${AppName}-badges-${Stage}-statusBadge'
+            FunctionName: !Sub "${AppName}-status"
             Handler: index.handler
             MemorySize: 192
             Role: !GetAtt
                 - IamRoleLambdaExecution
                 - Arn
-            Runtime: nodejs12.x
+            Runtime: nodejs20.x
             Timeout: 6
             Environment:
                 Variables:
-                    BUCKET_BADGES: !Sub '${AppName}-badges-images-${Stage}'
+                    BUCKET_BADGES: !Sub "${AppName}-images"
 
     CommitIdBadgeLambdaFunction:
         DependsOn:
             - CopyZips
             - CommitIdBadgeLogGroup
-            - CommitIdFunctionRole
-        Type: 'AWS::Lambda::Function'
+        Type: "AWS::Lambda::Function"
         Properties:
             Code:
-                S3Bucket: !Ref 'LambdaZipsBucket'
+                S3Bucket: !Ref "LambdaZipsBucket"
                 S3Key: dist_commit_badges.zip
-            FunctionName: !Sub ${AppName}-badges-${Stage}-commitIdBadge
+            FunctionName: !Sub "${AppName}-commit-id"
             Handler: index.handler
             MemorySize: 192
             Role: !GetAtt
                 - CommitIdFunctionRole
                 - Arn
-            Runtime: nodejs12.x
+            Runtime: nodejs20.x
             Timeout: 6
             Environment:
                 Variables:
-                    BUCKET_BADGES: !Sub '${AppName}-badges-images-${Stage}'
+                    BUCKET_BADGES: !Sub "${AppName}-images"
 
     # CloudWatch Events
     StatusBadgeEventsRuleCloudWatchEvent1:
-        Type: 'AWS::Events::Rule'
+        Type: "AWS::Events::Rule"
         Properties:
             EventPattern:
                 source:
                     - aws.codebuild
                 detail-type:
                     - CodeBuild Build State Change
-                detail:
-                    project-name: !Ref CodeBuildProjectsNames
             State: ENABLED
             Description: Triggered upon status change of CodeBuild project
-            Name: !Sub '${AppName}-badges-status-build-event-${Stage}'
+            Name: !Sub "${AppName}-status-build-event"
             Targets:
                 - Arn: !GetAtt
                       - StatusBadgeLambdaFunction
                       - Arn
                   Id: statusBadgeCloudWatchEvent
     StatusBadgeLambdaPermissionEventsRuleCloudWatchEvent1:
-        Type: 'AWS::Lambda::Permission'
+        Type: "AWS::Lambda::Permission"
         Properties:
             FunctionName: !GetAtt
                 - StatusBadgeLambdaFunction
                 - Arn
-            Action: 'lambda:InvokeFunction'
+            Action: "lambda:InvokeFunction"
             Principal: events.amazonaws.com
             SourceArn: !GetAtt
                 - StatusBadgeEventsRuleCloudWatchEvent1
                 - Arn
     StatusBadgeEventsRuleCloudWatchEvent2:
-        Type: 'AWS::Events::Rule'
+        Type: "AWS::Events::Rule"
         Properties:
             EventPattern:
                 source:
                     - aws.codepipeline
                 detail-type:
                     - CodePipeline Pipeline Execution State Change
-                detail:
-                    pipeline: !Ref CodePipelineNames
+                    - CodePipeline Stage Execution State Change
+                    - CodePipeline Action Execution State Change
             State: ENABLED
             Description: Triggered upon status change of CodePipeline
-            Name: !Sub '${AppName}-badges-status-pipeline-event-${Stage}'
+            Name: !Sub "${AppName}-status-pipeline-event"
             Targets:
                 - Arn: !GetAtt
                       - StatusBadgeLambdaFunction
                       - Arn
                   Id: statusBadgeCloudWatchEvent
     StatusBadgeLambdaPermissionEventsRuleCloudWatchEvent2:
-        Type: 'AWS::Lambda::Permission'
+        Type: "AWS::Lambda::Permission"
         Properties:
             FunctionName: !GetAtt
                 - StatusBadgeLambdaFunction
                 - Arn
-            Action: 'lambda:InvokeFunction'
+            Action: "lambda:InvokeFunction"
             Principal: events.amazonaws.com
             SourceArn: !GetAtt
                 - StatusBadgeEventsRuleCloudWatchEvent2
                 - Arn
     CommitIdBadgeEventsRuleCloudWatchEvent1:
-        Type: 'AWS::Events::Rule'
+        Type: "AWS::Events::Rule"
         Properties:
             EventPattern:
                 source:
                     - aws.codepipeline
                 detail-type:
                     - CodePipeline Pipeline Execution State Change
-                detail:
-                    pipeline: !Ref CodePipelineNames
+                    - CodePipeline Stage Execution State Change
+                    - CodePipeline Action Execution State Change
             State: ENABLED
             Description: Triggered upon status change of CodePipeline
-            Name: !Sub '${AppName}-badges-commitid-pipeline-event-${Stage}'
+            Name: !Sub "${AppName}-commit-id-pipeline-event"
             Targets:
                 - Arn: !GetAtt
                       - CommitIdBadgeLambdaFunction
                       - Arn
                   Id: commitIdBadgeCloudWatchEvent
     CommitIdBadgeLambdaPermissionEventsRuleCloudWatchEvent1:
-        Type: 'AWS::Lambda::Permission'
+        Type: "AWS::Lambda::Permission"
         Properties:
             FunctionName: !GetAtt
                 - CommitIdBadgeLambdaFunction
                 - Arn
-            Action: 'lambda:InvokeFunction'
+            Action: "lambda:InvokeFunction"
             Principal: events.amazonaws.com
             SourceArn: !GetAtt
                 - CommitIdBadgeEventsRuleCloudWatchEvent1
@@ -257,37 +233,44 @@ Resources:
 
     # Images Bucket
     BuildBadgesImagesBucket:
-        Type: 'AWS::S3::Bucket'
+        Type: "AWS::S3::Bucket"
         DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
         Properties:
-            BucketName: !Sub '${AppName}-badges-images-${Stage}'
-            AccessControl: PublicRead
+            BucketName: !Sub "${AppName}-images"
+            OwnershipControls:
+                Rules:
+                    - ObjectOwnership: BucketOwnerEnforced
+            PublicAccessBlockConfiguration:
+                BlockPublicAcls: false
+                BlockPublicPolicy: false
+                IgnorePublicAcls: false
+                RestrictPublicBuckets: false
             WebsiteConfiguration:
                 IndexDocument: index.html
             CorsConfiguration:
                 CorsRules:
                     - AllowedHeaders:
-                          - '*'
+                          - "*"
                       AllowedMethods:
                           - GET
                           - HEAD
                       AllowedOrigins:
-                          - 'https://github.com'
-                          - 'https://www.github.com'
+                          - "https://github.com"
+                          - "https://www.github.com"
                       MaxAge: 90
     BuildBadgesImagesBucketPolicy:
-        DependsOn: BuildBadgesImagesBucket
-        Type: 'AWS::S3::BucketPolicy'
+        Type: "AWS::S3::BucketPolicy"
         Properties:
             PolicyDocument:
-                Id: !Sub 'BuildBadgesImagesBucketPolicy-${Stage}'
+                Id: !Sub "${AppName}-bucket-policy"
                 Version: 2012-10-17
                 Statement:
                     - Sid: PublicReadForGetBucketObjects
                       Effect: Allow
-                      Principal: '*'
-                      Action: 's3:GetObject'
-                      Resource: !Sub 'arn:aws:s3:::${AppName}-badges-images-${Stage}/*'
+                      Principal: "*"
+                      Action: "s3:GetObject"
+                      Resource: !Sub "arn:aws:s3:::${BuildBadgesImagesBucket}/*"
             Bucket: !Ref BuildBadgesImagesBucket
 
     # Copy Lambda functions zip files to a bucked (LambdaZipsBucket)
@@ -295,10 +278,10 @@ Resources:
     CopyZips:
         Type: Custom::CopyZips
         Properties:
-            ServiceToken: !GetAtt 'CopyZipsFunction.Arn'
-            DestBucket: !Ref 'LambdaZipsBucket'
+            ServiceToken: !GetAtt "CopyZipsFunction.Arn"
+            DestBucket: !Ref "LambdaZipsBucket"
             SourceBucket: aws-build-badges-deployment-bucket
-            Prefix: ''
+            Prefix: ""
             Objects:
                 - dist_status_badges.zip
                 - dist_commit_badges.zip
@@ -306,7 +289,7 @@ Resources:
         Type: AWS::IAM::Role
         Properties:
             AssumeRolePolicyDocument:
-                Version: '2012-10-17'
+                Version: "2012-10-17"
                 Statement:
                     - Effect: Allow
                       Principal:
@@ -318,27 +301,27 @@ Resources:
             Policies:
                 - PolicyName: lambda-copier
                   PolicyDocument:
-                      Version: '2012-10-17'
+                      Version: "2012-10-17"
                       Statement:
                           - Effect: Allow
                             Action:
                                 - s3:GetObject
                             Resource:
-                                - 'arn:aws:s3:::aws-build-badges-deployment-bucket/*'
+                                - "arn:aws:s3:::aws-build-badges-deployment-bucket/*"
                           - Effect: Allow
                             Action:
                                 - s3:PutObject
                                 - s3:DeleteObject
                             Resource:
-                                - !Sub 'arn:aws:s3:::${LambdaZipsBucket}/*'
+                                - !Sub "arn:aws:s3:::${LambdaZipsBucket}/*"
 
     CopyZipsFunction:
         Type: AWS::Lambda::Function
         Properties:
             Description: Copies objects from a source S3 bucket to a destination
             Handler: index.handler
-            Runtime: python2.7
-            Role: !GetAtt 'CopyZipsRole.Arn'
+            Runtime: python3.12
+            Role: !GetAtt "CopyZipsRole.Arn"
             Timeout: 240
             Code:
                 ZipFile: |
@@ -391,74 +374,12 @@ Resources:
                             timer.cancel()
                             cfnresponse.send(event, context, status, {}, None)
 
-    # MacroFilesLinks:
-    #     Type: AWS::Lambda::Function
-    #     Properties:
-    #         Description: Generates links to the svg files
-    #         Handler: index.handler
-    #         Runtime: node12.x
-    #         Role: !GetAtt 'CopyZipsRole.Arn' # TODO: create role
-    #         Timeout: 30
-    #         Code:
-    #             ZipFile: |
-    #                 const AWS = require('aws-sdk')
-    #                 const response = require('cfn-response')
-    #                 def generateUrl(bucketUrl, filename):
-    #                     s3 = boto3.client('s3')
-    #                     for o in objects:
-    #                         key = prefix + o
-    #                         copy_source = {
-    #                             'Bucket': source_bucket,
-    #                             'Key': key
-    #                         }
-    #                         print('copy_source: %s' % copy_source)
-    #                         print('dest_bucket = %s'%dest_bucket)
-    #                         print('key = %s' %key)
-    #                         s3.copy_object(CopySource=copy_source, Bucket=dest_bucket,
-    #                                 Key=key)
-    #                 def delete_objects(bucket, prefix, objects):
-    #                     s3 = boto3.client('s3')
-    #                     objects = {'Objects': [{'Key': prefix + o} for o in objects]}
-    #                     s3.delete_objects(Bucket=bucket, Delete=objects)
-    #                 def timeout(event, context):
-    #                     logging.error('Execution is about to time out, sending failure response to CloudFormation')
-    #                     cfnresponse.send(event, context, cfnresponse.FAILED, {}, None)
-    #                 def handler(event, context):
-    #                     # make sure we send a failure to CloudFormation if the function
-    #                     # is going to timeout
-    #                     timer = threading.Timer((context.get_remaining_time_in_millis()
-    #                                 / 1000.00) - 0.5, timeout, args=[event, context])
-    #                     timer.start()
-    #                     print('Received event: %s' % json.dumps(event))
-    #                     status = cfnresponse.SUCCESS
-    #                     try:
-    #                         source_bucket = event['ResourceProperties']['SourceBucket']
-    #                         dest_bucket = event['ResourceProperties']['DestBucket']
-    #                         prefix = event['ResourceProperties']['Prefix']
-    #                         objects = event['ResourceProperties']['Objects']
-    #                         if event['RequestType'] == 'Delete':
-    #                             delete_objects(dest_bucket, prefix, objects)
-    #                         else:
-    #                             copy_objects(source_bucket, dest_bucket, prefix, objects)
-    #                     except Exception as e:
-    #                         logging.error('Exception: %s' % e, exc_info=True)
-    #                         status = cfnresponse.FAILED
-    #                     finally:
-    #                         timer.cancel()
-    #                         cfnresponse.send(event, context, status, {}, None)
+    # No-op section removed
 
 Outputs:
-    #     # TODO: Update lambda function ARN
     LambdaZipsBucketName:
         Description: Contains the Lambda functions zip files
         Value: !Ref LambdaZipsBucket
-    BuildBadgesImagesBucket:
-        Description: Contains the images that were created
-    # CodeBuildBuildBadgeURL:
-    #     Description: Contains the images that were created
-    #     Value: !Sub "https://${AppName}-badges-images-dev.s3.${AWS::Region}.${AWS::Suffix}/${AppName}-${Stage}.svg"
-    # CodeBuildBuildBadgeURL:
-    #     Description: Contains the images that were created
-    #     Value: !Sub "https://${AppName}-badges-images-dev.s3.${AWS::Region}.${AWS::Suffix}/${AppName}-${Stage}.svg"
-#         Description: Current Lambda function version
-#         Value: !Ref CommitIdBadgeLambdaVersioniw8TmrGBHA5KtnLxbGxvzJLADEFpM4LY1MNKwlLsTyM
+    BuildBadgesImagesBucketName:
+        Description: Name of the bucket containing generated images
+        Value: !Ref BuildBadgesImagesBucket

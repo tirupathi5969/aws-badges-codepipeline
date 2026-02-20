@@ -6,7 +6,9 @@
     "module": "es6",
     "target": "es5",
     "outDir": "./dist/",
-    "allowJs": true
+    "allowJs": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true
   },
   "exclude": [
     "src/timestamp-badges",

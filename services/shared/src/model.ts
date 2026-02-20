@@ -1,5 +1,5 @@
-const S3 = require('aws-sdk/clients/s3');
-const s3 = new S3({ apiVersion: '2006-03-01', region: process.env.AWS_REGION });
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const s3 = new S3Client({ region: process.env.AWS_REGION || 'ca-central-1' });
 import { isBucketNameValid } from './controller';
 
 export class BaseS3Object {
@@ -56,26 +56,26 @@ export class BaseS3Object {
             Bucket: this.Bucket,
             Body: this.Body,
             Expires: this.Expires,
-            ACL: this.ACL,
             ContentType: this.ContentType,
             CacheControl: this.CacheControl,
         };
     }
 
     public async uploadObject() {
-        let my_obj = this;
-        const params = my_obj.serialize();
-        var putObjectPromise = s3.putObject(params).promise();
-        return putObjectPromise
-            .then(function (data: { ETag: any; }) {
-                // console.log('Success', data);
-                my_obj.ETag = data.ETag;
-                return data.ETag;
-            })
-            .catch(function (err: any) {
-                const errorMessage = `Failed to upload SVG to S3: ${err}`;
-                // console.log(errorMessage);
-                return errorMessage;
-            });
+        const params = this.serialize();
+        // Remove ACL if it causes issues, but following previous fix I'll keep it out of params if possible
+        // The serialze() currently includes Key, Bucket, Body, Expires, ContentType, CacheControl
+        const command = new PutObjectCommand(params);
+        try {
+            const data = await s3.send(command);
+            console.log('Success', data);
+            this.ETag = data.ETag;
+            return data.ETag;
+        } catch (err) {
+            const error = err as any;
+            const errorMessage = `Failed to upload SVG to S3: ${error}`;
+            console.log(errorMessage);
+            return errorMessage;
+        }
     }
 }

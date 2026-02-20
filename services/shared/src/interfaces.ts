@@ -5,6 +5,8 @@ interface Detail {
 
     // CodePipeline
     pipeline?: string;
+    stage?: string;
+    action?: string;
     state?: string;
     'execution-id'?: string;
     version?: number;

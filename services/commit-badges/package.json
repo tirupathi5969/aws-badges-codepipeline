@@ -72,6 +72,8 @@
     ]
   },
   "dependencies": {
+    "@aws-sdk/client-codepipeline": "^3.994.0",
+    "@aws-sdk/client-s3": "^3.994.0",
     "serialize-javascript": "^3.1.0"
   }
 }
