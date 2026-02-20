@@ -6,18 +6,11 @@ Parameters:
         Type: String
         Default: "dx-aws-pipeline-badges"
 Resources:
-    LambdaZipsBucket:
-        Type: AWS::S3::Bucket
-
     # Log Groups
-    StatusBadgeLogGroup:
+    BadgeEngineLogGroup:
         Type: "AWS::Logs::LogGroup"
         Properties:
-            LogGroupName: !Sub "/aws/lambda/${AppName}-status"
-    CommitIdBadgeLogGroup:
-        Type: "AWS::Logs::LogGroup"
-        Properties:
-            LogGroupName: !Sub "/aws/lambda/${AppName}-commit-id"
+            LogGroupName: !Sub "/aws/lambda/${AppName}-engine"
 
     # Roles
     IamRoleLambdaExecution:
@@ -56,93 +49,69 @@ Resources:
                             Resource: !Sub "arn:aws:s3:::${AppName}-images/*"
                           - Effect: Allow
                             Action:
-                                - "logs:CreateLogGroup"
-                                - "logs:CreateLogStream"
-                                - "logs:PutLogEvents"
-                            Resource: "arn:aws:logs:*:*:*"
-            Path: /
-            RoleName: !Join
-                - "-"
-                - - !Sub "${AppName}-lambda-role"
-                  - !Ref "AWS::Region"
-
-    CommitIdFunctionRole:
-        Type: "AWS::IAM::Role"
-        Properties:
-            AssumeRolePolicyDocument:
-                Version: 2012-10-17
-                Statement:
-                    - Effect: Allow
-                      Principal:
-                          Service:
-                              - lambda.amazonaws.com
-                      Action: "sts:AssumeRole"
-            Policies:
-                - PolicyName: CommitIdFunctionRolePolicy
-                  PolicyDocument:
-                      Version: 2012-10-17
-                      Statement:
-                          - Effect: Allow
-                            Action:
-                                - "logs:CreateLogGroup"
-                                - "logs:CreateLogStream"
-                                - "logs:PutLogEvents"
-                            Resource:
-                                - "arn:aws:logs:*:*:*"
-                          - Effect: Allow
-                            Action:
                                 - "codepipeline:GetPipelineExecution"
                                 - "codepipeline:ListActionExecutions"
                             Resource:
                                 - "*"
-                          - Effect: Allow
-                            Action:
-                                - "s3:PutObject"
-                                - "s3:PutObjectAcl"
-                            Resource: !Sub "arn:aws:s3:::${AppName}-images/*"
+            Path: /
+            RoleName: !Sub "${AppName}-lambda-role"
 
     # Functions
-    StatusBadgeLambdaFunction:
-        DependsOn:
-            - CopyZips
-            - StatusBadgeLogGroup
+    BadgeFunction:
         Type: "AWS::Lambda::Function"
         Properties:
-            Code:
-                S3Bucket: !Ref "LambdaZipsBucket"
-                S3Key: dist_status_badges.zip
-            FunctionName: !Sub "${AppName}-status"
+            FunctionName: !Sub "${AppName}-engine"
+            Description: Unified engine for status, commit, and author badges
             Handler: index.handler
-            MemorySize: 192
-            Role: !GetAtt
-                - IamRoleLambdaExecution
-                - Arn
             Runtime: nodejs20.x
-            Timeout: 6
+            MemorySize: 256
+            Timeout: 15
+            Role: !GetAtt IamRoleLambdaExecution.Arn
             Environment:
                 Variables:
                     BUCKET_BADGES: !Sub "${AppName}-images"
-
-    CommitIdBadgeLambdaFunction:
-        DependsOn:
-            - CopyZips
-            - CommitIdBadgeLogGroup
-        Type: "AWS::Lambda::Function"
-        Properties:
             Code:
-                S3Bucket: !Ref "LambdaZipsBucket"
-                S3Key: dist_commit_badges.zip
-            FunctionName: !Sub "${AppName}-commit-id"
-            Handler: index.handler
-            MemorySize: 192
-            Role: !GetAtt
-                - CommitIdFunctionRole
-                - Arn
-            Runtime: nodejs20.x
-            Timeout: 6
-            Environment:
-                Variables:
-                    BUCKET_BADGES: !Sub "${AppName}-images"
+                ZipFile: |
+                    const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+                    const { CodePipelineClient, GetPipelineExecutionCommand, ListActionExecutionsCommand } = require('@aws-sdk/client-codepipeline');
+                    const s3 = new S3Client({});
+                    const cp = new CodePipelineClient({});
+                    const svg = (l, v, c) => {
+                      const lw = l.length * 8 + 14, vw = v.length * 7 + 14, tw = lw + vw;
+                      return `<svg xmlns="http://www.w3.org/2000/svg" width="${tw}" height="20" role="img" aria-label="${l}: ${v}"><linearGradient id="s" x2="0" y2="100%"><stop offset="0" stop-color="#bbb" stop-opacity=".1"/><stop offset="1" stop-opacity=".1"/></linearGradient><clipPath id="r"><rect width="${tw}" height="20" rx="3" fill="#fff"/></clipPath><g clip-path="url(#r)"><rect width="${lw}" height="20" fill="#555"/><rect x="${lw}" width="${vw}" height="20" fill="${c}"/><rect width="${tw}" height="20" fill="url(#s)"/></g><g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" text-rendering="geometricPrecision" font-size="110"><text x="${lw*5}" y="140" transform="scale(.1)" fill="#fff" textLength="${l.length*70}">${l}</text><text x="${(lw+vw/2)*10}" y="140" transform="scale(.1)" fill="#fff" textLength="${v.length*65}">${v}</text></g></svg>`;
+                    };
+                    exports.handler = async (e) => {
+                      console.log('Event:', JSON.stringify(e));
+                      const d = e.detail, p = d.pipeline || d['project-name'], s = d.stage ? `-${d.stage}` : "", st = (d.state || d['build-status'] || 'UNKNOWN').toUpperCase();
+                      const c = st === 'SUCCEEDED' ? '#4c1' : (['FAILED','STOPPED','ERROR'].includes(st) ? '#e05d44' : (['STARTED','IN_PROGRESS','RESUMED'].includes(st) ? '#dfb317' : '#979797'));
+                      await s3.send(new PutObjectCommand({ Bucket: process.env.BUCKET_BADGES, Key: `${p}${s}.svg`, Body: svg(d.pipeline ? 'pipeline' : 'build', st.toLowerCase(), c), ContentType: 'image/svg+xml', CacheControl: 'no-cache, no-store' }));
+                      if (d.pipeline && d['execution-id']) {
+                        try {
+                          const ex = await cp.send(new GetPipelineExecutionCommand({ pipelineName: p, pipelineExecutionId: d['execution-id'] }));
+                          const ac = await cp.send(new ListActionExecutionsCommand({ pipelineName: p, filter: { pipelineExecutionId: d['execution-id'] } }));
+                          let a = 'System', cid = 'N/A', t = new Date().toISOString().replace('T', ' ').split('.')[0];
+                          if (ex.pipelineExecution && ex.pipelineExecution.artifactRevisions && ex.pipelineExecution.artifactRevisions.length > 0) {
+                            const r = ex.pipelineExecution.artifactRevisions[0];
+                            cid = r.revisionId?.substring(0, 8) || 'N/A';
+                            const sm = r.revisionSummary ? JSON.parse(r.revisionSummary) : {};
+                            a = sm.AuthorName || sm.author || a;
+                          }
+                          const actionList = ac.actionExecutionDetails || [];
+                          const src = actionList.find(x => x.stageName === 'Source' || x.actionName === 'Source');
+                          if (src && src.output) {
+                            const v = src.output.outputVariables || src.output.executionVariables || {};
+                            a = v.AuthorDisplayName || v.AuthorName || v.AuthorId || a;
+                          }
+                          const common = { Bucket: process.env.BUCKET_BADGES, ContentType: 'image/svg+xml', CacheControl: 'no-cache, no-store' };
+                          await Promise.all([
+                            s3.send(new PutObjectCommand({ ...common, Key: `${p}${s}-commitId.svg`, Body: svg('commit', cid, '#9f9f9f') })),
+                            s3.send(new PutObjectCommand({ ...common, Key: `${p}${s}-timestamp.svg`, Body: svg('date', t, '#007ec6') })),
+                            s3.send(new PutObjectCommand({ ...common, Key: `${p}${s}-author.svg`, Body: svg('author', a, '#fe7d37') }))
+                          ]);
+                        } catch (err) { console.error('Metadata error:', err); }
+                      }
+                      return 'Success';
+                    };
 
     # CloudWatch Events
     StatusBadgeEventsRuleCloudWatchEvent1:
@@ -158,14 +127,14 @@ Resources:
             Name: !Sub "${AppName}-status-build-event"
             Targets:
                 - Arn: !GetAtt
-                      - StatusBadgeLambdaFunction
+                      - BadgeFunction
                       - Arn
                   Id: statusBadgeCloudWatchEvent
     StatusBadgeLambdaPermissionEventsRuleCloudWatchEvent1:
         Type: "AWS::Lambda::Permission"
         Properties:
             FunctionName: !GetAtt
-                - StatusBadgeLambdaFunction
+                - BadgeFunction
                 - Arn
             Action: "lambda:InvokeFunction"
             Principal: events.amazonaws.com
@@ -187,14 +156,14 @@ Resources:
             Name: !Sub "${AppName}-status-pipeline-event"
             Targets:
                 - Arn: !GetAtt
-                      - StatusBadgeLambdaFunction
+                      - BadgeFunction
                       - Arn
                   Id: statusBadgeCloudWatchEvent
     StatusBadgeLambdaPermissionEventsRuleCloudWatchEvent2:
         Type: "AWS::Lambda::Permission"
         Properties:
             FunctionName: !GetAtt
-                - StatusBadgeLambdaFunction
+                - BadgeFunction
                 - Arn
             Action: "lambda:InvokeFunction"
             Principal: events.amazonaws.com
@@ -216,14 +185,14 @@ Resources:
             Name: !Sub "${AppName}-commit-id-pipeline-event"
             Targets:
                 - Arn: !GetAtt
-                      - CommitIdBadgeLambdaFunction
+                      - BadgeFunction
                       - Arn
                   Id: commitIdBadgeCloudWatchEvent
     CommitIdBadgeLambdaPermissionEventsRuleCloudWatchEvent1:
         Type: "AWS::Lambda::Permission"
         Properties:
             FunctionName: !GetAtt
-                - CommitIdBadgeLambdaFunction
+                - BadgeFunction
                 - Arn
             Action: "lambda:InvokeFunction"
             Principal: events.amazonaws.com
@@ -273,113 +242,7 @@ Resources:
                       Resource: !Sub "arn:aws:s3:::${BuildBadgesImagesBucket}/*"
             Bucket: !Ref BuildBadgesImagesBucket
 
-    # Copy Lambda functions zip files to a bucked (LambdaZipsBucket)
-    # which resides in the region of this stack
-    CopyZips:
-        Type: Custom::CopyZips
-        Properties:
-            ServiceToken: !GetAtt "CopyZipsFunction.Arn"
-            DestBucket: !Ref "LambdaZipsBucket"
-            SourceBucket: aws-build-badges-deployment-bucket
-            Prefix: ""
-            Objects:
-                - dist_status_badges.zip
-                - dist_commit_badges.zip
-    CopyZipsRole:
-        Type: AWS::IAM::Role
-        Properties:
-            AssumeRolePolicyDocument:
-                Version: "2012-10-17"
-                Statement:
-                    - Effect: Allow
-                      Principal:
-                          Service: lambda.amazonaws.com
-                      Action: sts:AssumeRole
-            ManagedPolicyArns:
-                - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-            Path: /
-            Policies:
-                - PolicyName: lambda-copier
-                  PolicyDocument:
-                      Version: "2012-10-17"
-                      Statement:
-                          - Effect: Allow
-                            Action:
-                                - s3:GetObject
-                            Resource:
-                                - "arn:aws:s3:::aws-build-badges-deployment-bucket/*"
-                          - Effect: Allow
-                            Action:
-                                - s3:PutObject
-                                - s3:DeleteObject
-                            Resource:
-                                - !Sub "arn:aws:s3:::${LambdaZipsBucket}/*"
-
-    CopyZipsFunction:
-        Type: AWS::Lambda::Function
-        Properties:
-            Description: Copies objects from a source S3 bucket to a destination
-            Handler: index.handler
-            Runtime: python3.12
-            Role: !GetAtt "CopyZipsRole.Arn"
-            Timeout: 240
-            Code:
-                ZipFile: |
-                    import json
-                    import logging
-                    import threading
-                    import boto3
-                    import cfnresponse
-                    def copy_objects(source_bucket, dest_bucket, prefix, objects):
-                        s3 = boto3.client('s3')
-                        for o in objects:
-                            key = prefix + o
-                            copy_source = {
-                                'Bucket': source_bucket,
-                                'Key': key
-                            }
-                            print('copy_source: %s' % copy_source)
-                            print('dest_bucket = %s'%dest_bucket)
-                            print('key = %s' %key)
-                            s3.copy_object(CopySource=copy_source, Bucket=dest_bucket,
-                                    Key=key)
-                    def delete_objects(bucket, prefix, objects):
-                        s3 = boto3.client('s3')
-                        objects = {'Objects': [{'Key': prefix + o} for o in objects]}
-                        s3.delete_objects(Bucket=bucket, Delete=objects)
-                    def timeout(event, context):
-                        logging.error('Execution is about to time out, sending failure response to CloudFormation')
-                        cfnresponse.send(event, context, cfnresponse.FAILED, {}, None)
-                    def handler(event, context):
-                        # make sure we send a failure to CloudFormation if the function
-                        # is going to timeout
-                        timer = threading.Timer((context.get_remaining_time_in_millis()
-                                    / 1000.00) - 0.5, timeout, args=[event, context])
-                        timer.start()
-                        print('Received event: %s' % json.dumps(event))
-                        status = cfnresponse.SUCCESS
-                        try:
-                            source_bucket = event['ResourceProperties']['SourceBucket']
-                            dest_bucket = event['ResourceProperties']['DestBucket']
-                            prefix = event['ResourceProperties']['Prefix']
-                            objects = event['ResourceProperties']['Objects']
-                            if event['RequestType'] == 'Delete':
-                                delete_objects(dest_bucket, prefix, objects)
-                            else:
-                                copy_objects(source_bucket, dest_bucket, prefix, objects)
-                        except Exception as e:
-                            logging.error('Exception: %s' % e, exc_info=True)
-                            status = cfnresponse.FAILED
-                        finally:
-                            timer.cancel()
-                            cfnresponse.send(event, context, status, {}, None)
-
-    # No-op section removed
-
 Outputs:
-    LambdaZipsBucketName:
-        Description: Contains the Lambda functions zip files
-        Value: !Ref LambdaZipsBucket
     BuildBadgesImagesBucketName:
         Description: Name of the bucket containing generated images
         Value: !Ref BuildBadgesImagesBucket
