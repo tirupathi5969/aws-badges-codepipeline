@@ -87,6 +87,7 @@ Resources:
                             Action:
                                 - "codepipeline:GetPipelineExecution"
                                 - "codepipeline:ListActionExecutions"
+                                - "codepipeline:GetPipeline"
                             Resource:
                                 - "*"
             Path: /
@@ -157,26 +158,52 @@ Resources:
                       return `<svg xmlns="http://www.w3.org/2000/svg" width="${tw}" height="20" role="img" aria-label="${l}: ${v}"><linearGradient id="s" x2="0" y2="100%"><stop offset="0" stop-color="#bbb" stop-opacity=".1"/><stop offset="1" stop-opacity=".1"/></linearGradient><clipPath id="r"><rect width="${tw}" height="20" rx="3" fill="#fff"/></clipPath><g clip-path="url(#r)"><rect width="${lw}" height="20" fill="#555"/>${bg}<rect width="${tw}" height="20" fill="url(#s)"/></g><g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" text-rendering="geometricPrecision" font-size="110"><text x="${lw*5}" y="140" transform="scale(.1)" fill="#fff" textLength="${l.length*70}">${l}</text><text x="${(lw+vw/2)*10}" y="140" transform="scale(.1)" fill="#fff" textLength="${v.length*65}">${v}</text></g></svg>`;
                     };
                     exports.handler = async (e) => {
-                      const d = e.detail, p = d.pipeline || d['project-name'], s = d.stage ? `-${d.stage}` : "", st = (d.state || d['build-status'] || 'UNKNOWN').toUpperCase();
-                      const c = st === 'SUCCEEDED' ? '#4c1' : (['FAILED','STOPPED','ERROR'].includes(st) ? '#e05d44' : (['STARTED','IN_PROGRESS','RESUMED'].includes(st) ? '#dfb317' : '#979797'));
-                      await s3.send(new PutObjectCommand({ Bucket: process.env.BUCKET_BADGES, Key: `${p}/${p}${s}.svg`, Body: svg(d.pipeline ? 'pipeline' : 'build', st.toLowerCase(), c), ContentType: 'image/svg+xml', CacheControl: 'no-cache, no-store' }));
+                      const d = e.detail, type = e['detail-type'];
+                      const p = d.pipeline || d['project-name'];
+                      const s = d.stage ? `-${d.stage}` : "";
+                      const st = (d.state || d['build-status'] || 'UNKNOWN').toUpperCase();
+                      const isAction = type.includes('Action');
+                      
+                      // 1. Update Main Status Badge (Only for Pipeline or Stage events, or Build events)
+                      // We ignore 'Action' events for the main status to avoid race conditions with 'Stage' events.
+                      if (!isAction) {
+                        const c = st === 'SUCCEEDED' ? '#4c1' : (['FAILED','STOPPED','ERROR'].includes(st) ? '#e05d44' : (['STARTED','IN_PROGRESS','RESUMED'].includes(st) ? '#dfb317' : '#979797'));
+                        await s3.send(new PutObjectCommand({ 
+                          Bucket: process.env.BUCKET_BADGES, 
+                          Key: `${p}/${p}${s}.svg`, 
+                          Body: svg(d.pipeline ? 'pipeline' : 'build', st.toLowerCase(), c), 
+                          ContentType: 'image/svg+xml', 
+                          CacheControl: 'no-cache, no-store' 
+                        }));
+                      }
+
+                      // 2. Update Metadata (Commit/Author/Time) - Triggered by any event with execution ID
                       if (d.pipeline && d['execution-id']) {
                         try {
+                          // Only fetch heavy metadata on SUCCEEDED or STARTED events to save API calls
                           const ex = await cp.send(new GetPipelineExecutionCommand({ pipelineName: p, pipelineExecutionId: d['execution-id'] }));
                           const ac = await cp.send(new ListActionExecutionsCommand({ pipelineName: p, filter: { pipelineExecutionId: d['execution-id'] } }));
+                          
                           let a = 'System', cid = 'N/A', t = new Date().toISOString().replace('T', ' ').split('.')[0];
-                          if (ex.pipelineExecution && ex.pipelineExecution.artifactRevisions && ex.pipelineExecution.artifactRevisions.length > 0) {
+                          
+                          // Extract from Pipeline Execution
+                          if (ex.pipelineExecution?.artifactRevisions?.length > 0) {
                             const r = ex.pipelineExecution.artifactRevisions[0];
                             cid = r.revisionId?.substring(0, 8) || 'N/A';
-                            const sm = r.revisionSummary ? JSON.parse(r.revisionSummary) : {};
-                            a = sm.AuthorName || sm.author || a;
+                            try {
+                                const sm = r.revisionSummary ? JSON.parse(r.revisionSummary) : {};
+                                a = sm.AuthorName || sm.author || a;
+                            } catch(e) {}
                           }
+                          
+                          // Extra check from Action Variables
                           const actionList = ac.actionExecutionDetails || [];
                           const src = actionList.find(x => x.stageName === 'Source' || x.actionName === 'Source');
-                          if (src && src.output) {
+                          if (src?.output) {
                             const v = src.output.outputVariables || src.output.executionVariables || {};
                             a = v.AuthorDisplayName || v.AuthorName || v.AuthorId || a;
                           }
+
                           const common = { Bucket: process.env.BUCKET_BADGES, ContentType: 'image/svg+xml', CacheControl: 'no-cache, no-store' };
                           await Promise.all([
                             s3.send(new PutObjectCommand({ ...common, Key: `${p}/${p}${s}-commitId.svg`, Body: svg('commit', cid, '#9f9f9f') })),
@@ -185,67 +212,37 @@ Resources:
                           ]);
                         } catch (err) { console.error('Metadata error:', err); }
                       }
+                      
                       await purgeCamoCache(p);
                       return 'Success';
                     };
 
     # CloudWatch Events
-    StatusBadgeEventsRuleCloudWatchEvent1:
+    BadgeTriggerEventsRule:
         Type: "AWS::Events::Rule"
         Properties:
             EventPattern:
                 source:
                     - aws.codebuild
-                detail-type:
-                    - CodeBuild Build State Change
-            State: ENABLED
-            Description: Triggered upon status change of CodeBuild project
-            Name: !Sub "${AppName}-status-build-event"
-            Targets:
-                - Arn: !GetAtt
-                      - BadgeFunction
-                      - Arn
-                  Id: statusBadgeCloudWatchEvent
-    StatusBadgeLambdaPermissionEventsRuleCloudWatchEvent1:
-        Type: "AWS::Lambda::Permission"
-        Properties:
-            FunctionName: !GetAtt
-                - BadgeFunction
-                - Arn
-            Action: "lambda:InvokeFunction"
-            Principal: events.amazonaws.com
-            SourceArn: !GetAtt
-                - StatusBadgeEventsRuleCloudWatchEvent1
-                - Arn
-    StatusBadgeEventsRuleCloudWatchEvent2:
-        Type: "AWS::Events::Rule"
-        Properties:
-            EventPattern:
-                source:
                     - aws.codepipeline
                 detail-type:
+                    - CodeBuild Build State Change
                     - CodePipeline Pipeline Execution State Change
                     - CodePipeline Stage Execution State Change
                     - CodePipeline Action Execution State Change
             State: ENABLED
-            Description: Triggered upon status change of CodePipeline
-            Name: !Sub "${AppName}-status-pipeline-event"
+            Description: Unified trigger for CodeBuild and CodePipeline status changes
+            Name: !Sub "${AppName}-unified-trigger"
             Targets:
-                - Arn: !GetAtt
-                      - BadgeFunction
-                      - Arn
-                  Id: statusBadgeCloudWatchEvent
-    StatusBadgeLambdaPermissionEventsRuleCloudWatchEvent2:
+                - Arn: !GetAtt BadgeFunction.Arn
+                  Id: BadgeFunctionTarget
+    BadgeFunctionPermission:
         Type: "AWS::Lambda::Permission"
         Properties:
-            FunctionName: !GetAtt
-                - BadgeFunction
-                - Arn
+            FunctionName: !GetAtt BadgeFunction.Arn
             Action: "lambda:InvokeFunction"
             Principal: events.amazonaws.com
-            SourceArn: !GetAtt
-                - StatusBadgeEventsRuleCloudWatchEvent2
-                - Arn
+            SourceArn: !GetAtt BadgeTriggerEventsRule.Arn
     # Images Bucket
     BuildBadgesImagesBucket:
         Type: "AWS::S3::Bucket"
