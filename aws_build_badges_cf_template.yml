@@ -1,7 +1,6 @@
 AWSTemplateFormatVersion: 2010-09-09
 Description: The AWS CloudFormation template for this Serverless application
 Parameters:
-    # No-op section removed
     AppName:
         Type: String
         Default: "dx-aws-pipeline-badges"
@@ -11,6 +10,44 @@ Resources:
         Type: "AWS::Logs::LogGroup"
         Properties:
             LogGroupName: !Sub "/aws/lambda/${AppName}-engine"
+
+    CloudFrontOAC:
+        Type: AWS::CloudFront::OriginAccessControl
+        Properties:
+            OriginAccessControlConfig:
+                Description: "OAC for badges bucket"
+                Name: !Sub "${AppName}-oac"
+                OriginAccessControlOriginType: s3
+                SigningBehavior: always
+                SigningProtocol: sigv4
+
+    BadgesCloudFrontDistribution:
+        Type: AWS::CloudFront::Distribution
+        Properties:
+            DistributionConfig:
+                Comment: !Sub "CloudFront distribution for ${AppName} badges"
+                Enabled: true
+                DefaultCacheBehavior:
+                    TargetOriginId: S3Origin
+                    ViewerProtocolPolicy: redirect-to-https
+                    AllowedMethods:
+                        - GET
+                        - HEAD
+                        - OPTIONS
+                    CachedMethods:
+                        - GET
+                        - HEAD
+                        - OPTIONS
+                    CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # CachingDisabled managed policy
+                    OriginRequestPolicyId: "88a5eaf4-2fd4-4709-b370-b4c650ea3fcf" # CORS-S3Origin managed policy
+                Origins:
+                    - Id: S3Origin
+                      DomainName: !GetAtt BuildBadgesImagesBucket.RegionalDomainName
+                      S3OriginConfig:
+                          OriginAccessIdentity: "" # Required for S3 origins, but OAC is used instead
+                      OriginAccessControlId: !GetAtt CloudFrontOAC.Id
+                ViewerCertificate:
+                    CloudFrontDefaultCertificate: true
 
     # Roles
     IamRoleLambdaExecution:
@@ -45,7 +82,6 @@ Resources:
                           - Effect: Allow
                             Action:
                                 - "s3:PutObject"
-                                - "s3:PutObjectAcl"
                             Resource: !Sub "arn:aws:s3:::${AppName}-images/*"
                           - Effect: Allow
                             Action:
@@ -70,15 +106,48 @@ Resources:
             Environment:
                 Variables:
                     BUCKET_BADGES: !Sub "${AppName}-images"
+                    GITHUB_PURGE_URLS: "https://github.com/tirupathi5969/aws-badges-test,https://github.com/tirupathi5969/aws-badges-test-repo"
             Code:
                 ZipFile: |
                     const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
                     const { CodePipelineClient, GetPipelineExecutionCommand, ListActionExecutionsCommand } = require('@aws-sdk/client-codepipeline');
+                    const https = require('https');
                     const s3 = new S3Client({});
                     const cp = new CodePipelineClient({});
+                    const purgeCamoCache = async () => {
+                        const repoUrls = (process.env.GITHUB_PURGE_URLS || "").split(',').map(s=>s.trim()).filter(Boolean);
+                        if(repoUrls.length === 0) return;
+                        try {
+                            for (const repoUrl of repoUrls) {
+                                const html = await new Promise((resolve, reject) => {
+                                    https.get(repoUrl, (res) => {
+                                        let data = '';
+                                        res.on('data', chunk => data += chunk);
+                                        res.on('end', () => resolve(data));
+                                    }).on('error', reject);
+                                });
+                                const camoRegex = /https:\/\/camo\.githubusercontent\.com\/[a-zA-Z0-9.\/?=_%:-]+/g;
+                                const uniqueUrls = [...new Set(html.match(camoRegex) || [])];
+                                console.log(`Found ${uniqueUrls.length} Camo URLs in ${repoUrl}`);
+                                for (const url of uniqueUrls) {
+                                    await new Promise((resolve) => {
+                                        const req = https.request(url, { method: 'PURGE' }, () => resolve());
+                                        req.on('error', () => resolve());
+                                        req.end();
+                                    });
+                                }
+                            }
+                        } catch (e) { console.error('Error purging Camo:', e); }
+                    };
                     const svg = (l, v, c) => {
                       const lw = l.length * 8 + 14, vw = v.length * 7 + 14, tw = lw + vw;
-                      return `<svg xmlns="http://www.w3.org/2000/svg" width="${tw}" height="20" role="img" aria-label="${l}: ${v}"><linearGradient id="s" x2="0" y2="100%"><stop offset="0" stop-color="#bbb" stop-opacity=".1"/><stop offset="1" stop-opacity=".1"/></linearGradient><clipPath id="r"><rect width="${tw}" height="20" rx="3" fill="#fff"/></clipPath><g clip-path="url(#r)"><rect width="${lw}" height="20" fill="#555"/><rect x="${lw}" width="${vw}" height="20" fill="${c}"/><rect width="${tw}" height="20" fill="url(#s)"/></g><g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" text-rendering="geometricPrecision" font-size="110"><text x="${lw*5}" y="140" transform="scale(.1)" fill="#fff" textLength="${l.length*70}">${l}</text><text x="${(lw+vw/2)*10}" y="140" transform="scale(.1)" fill="#fff" textLength="${v.length*65}">${v}</text></g></svg>`;
+                      let bg = `<rect x="${lw}" width="${vw}" height="20" fill="${c}"/>`;
+                      if (v === 'in progress' || v === 'in_progress' || v === 'started') {
+                        const c1 = '#dfb317', c2 = '#f8cd40';
+                        const p = `<pattern id="p" width="28" height="28" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect x="0" width="14" height="28" fill="${c1}"><animate attributeName="x" from="0" to="28" dur="1s" repeatCount="indefinite"/></rect><rect x="14" width="14" height="28" fill="${c2}"><animate attributeName="x" from="14" to="42" dur="1s" repeatCount="indefinite"/></rect><rect x="-14" width="14" height="28" fill="${c2}"><animate attributeName="x" from="-14" to="14" dur="1s" repeatCount="indefinite"/></rect></pattern>`;
+                        bg = `<defs>${p}</defs><rect x="${lw}" width="${vw}" height="20" fill="url(#p)"/>`;
+                      }
+                      return `<svg xmlns="http://www.w3.org/2000/svg" width="${tw}" height="20" role="img" aria-label="${l}: ${v}"><linearGradient id="s" x2="0" y2="100%"><stop offset="0" stop-color="#bbb" stop-opacity=".1"/><stop offset="1" stop-opacity=".1"/></linearGradient><clipPath id="r"><rect width="${tw}" height="20" rx="3" fill="#fff"/></clipPath><g clip-path="url(#r)"><rect width="${lw}" height="20" fill="#555"/>${bg}<rect width="${tw}" height="20" fill="url(#s)"/></g><g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" text-rendering="geometricPrecision" font-size="110"><text x="${lw*5}" y="140" transform="scale(.1)" fill="#fff" textLength="${l.length*70}">${l}</text><text x="${(lw+vw/2)*10}" y="140" transform="scale(.1)" fill="#fff" textLength="${v.length*65}">${v}</text></g></svg>`;
                     };
                     exports.handler = async (e) => {
                       console.log('Event:', JSON.stringify(e));
@@ -110,6 +179,7 @@ Resources:
                           ]);
                         } catch (err) { console.error('Metadata error:', err); }
                       }
+                      await purgeCamoCache();
                       return 'Success';
                     };
 
@@ -170,36 +240,6 @@ Resources:
             SourceArn: !GetAtt
                 - StatusBadgeEventsRuleCloudWatchEvent2
                 - Arn
-    CommitIdBadgeEventsRuleCloudWatchEvent1:
-        Type: "AWS::Events::Rule"
-        Properties:
-            EventPattern:
-                source:
-                    - aws.codepipeline
-                detail-type:
-                    - CodePipeline Pipeline Execution State Change
-                    - CodePipeline Stage Execution State Change
-                    - CodePipeline Action Execution State Change
-            State: ENABLED
-            Description: Triggered upon status change of CodePipeline
-            Name: !Sub "${AppName}-commit-id-pipeline-event"
-            Targets:
-                - Arn: !GetAtt
-                      - BadgeFunction
-                      - Arn
-                  Id: commitIdBadgeCloudWatchEvent
-    CommitIdBadgeLambdaPermissionEventsRuleCloudWatchEvent1:
-        Type: "AWS::Lambda::Permission"
-        Properties:
-            FunctionName: !GetAtt
-                - BadgeFunction
-                - Arn
-            Action: "lambda:InvokeFunction"
-            Principal: events.amazonaws.com
-            SourceArn: !GetAtt
-                - CommitIdBadgeEventsRuleCloudWatchEvent1
-                - Arn
-
     # Images Bucket
     BuildBadgesImagesBucket:
         Type: "AWS::S3::Bucket"
@@ -211,12 +251,10 @@ Resources:
                 Rules:
                     - ObjectOwnership: BucketOwnerEnforced
             PublicAccessBlockConfiguration:
-                BlockPublicAcls: false
-                BlockPublicPolicy: false
-                IgnorePublicAcls: false
-                RestrictPublicBuckets: false
-            WebsiteConfiguration:
-                IndexDocument: index.html
+                BlockPublicAcls: true
+                BlockPublicPolicy: true
+                IgnorePublicAcls: true
+                RestrictPublicBuckets: true
             CorsConfiguration:
                 CorsRules:
                     - AllowedHeaders:
@@ -235,14 +273,22 @@ Resources:
                 Id: !Sub "${AppName}-bucket-policy"
                 Version: 2012-10-17
                 Statement:
-                    - Sid: PublicReadForGetBucketObjects
+                    - Sid: AllowCloudFrontServicePrincipal
                       Effect: Allow
-                      Principal: "*"
+                      Principal:
+                          Service: cloudfront.amazonaws.com
                       Action: "s3:GetObject"
                       Resource: !Sub "arn:aws:s3:::${BuildBadgesImagesBucket}/*"
+                      Condition:
+                          StringEquals:
+                              "AWS:SourceArn": !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${BadgesCloudFrontDistribution}"
             Bucket: !Ref BuildBadgesImagesBucket
 
 Outputs:
     BuildBadgesImagesBucketName:
         Description: Name of the bucket containing generated images
         Value: !Ref BuildBadgesImagesBucket
+
+    CloudFrontDomainName:
+        Description: CloudFront URL for serving badges via CDN
+        Value: !GetAtt BadgesCloudFrontDistribution.DomainName
