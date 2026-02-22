@@ -106,38 +106,45 @@ Resources:
             Environment:
                 Variables:
                     BUCKET_BADGES: !Sub "${AppName}-images"
-                    GITHUB_PURGE_URLS: "https://github.com/tirupathi5969/aws-badges-test,https://github.com/tirupathi5969/aws-badges-test-repo"
             Code:
                 ZipFile: |
                     const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
-                    const { CodePipelineClient, GetPipelineExecutionCommand, ListActionExecutionsCommand } = require('@aws-sdk/client-codepipeline');
+                    const { CodePipelineClient, GetPipelineExecutionCommand, ListActionExecutionsCommand, GetPipelineCommand } = require('@aws-sdk/client-codepipeline');
                     const https = require('https');
                     const s3 = new S3Client({});
                     const cp = new CodePipelineClient({});
-                    const purgeCamoCache = async () => {
-                        const repoUrls = (process.env.GITHUB_PURGE_URLS || "").split(',').map(s=>s.trim()).filter(Boolean);
-                        if(repoUrls.length === 0) return;
+                    const purgeCamoCache = async (pName) => {
                         try {
-                            for (const repoUrl of repoUrls) {
-                                const html = await new Promise((resolve, reject) => {
-                                    https.get(repoUrl, (res) => {
-                                        let data = '';
-                                        res.on('data', chunk => data += chunk);
-                                        res.on('end', () => resolve(data));
-                                    }).on('error', reject);
+                            const pDef = await cp.send(new GetPipelineCommand({ name: pName }));
+                            const sourceStage = pDef.pipeline.stages.find(s => s.name === 'Source' || s.actions.some(a => a.actionTypeId.category === 'Source'));
+                            const sourceAction = sourceStage?.actions.find(a => a.actionTypeId.category === 'Source');
+                            if (!sourceAction) return;
+                            
+                            const config = sourceAction.configuration || {};
+                            const repoId = config.FullRepositoryId || (config.Owner && config.Repo ? `${config.Owner}/${config.Repo}` : null);
+                            if (!repoId) return;
+
+                            const repoUrl = `https://github.com/${repoId}`;
+                            const html = await new Promise((resolve, reject) => {
+                                https.get(repoUrl, (res) => {
+                                    let data = '';
+                                    res.on('data', chunk => data += chunk);
+                                    res.on('end', () => resolve(data));
+                                }).on('error', reject);
+                            });
+                            
+                            const camoRegex = /https:\/\/camo\.githubusercontent\.com\/[a-zA-Z0-9.\/?=_%:-]+/g;
+                            const uniqueUrls = [...new Set(html.match(camoRegex) || [])];
+                            console.log(`Auto-discovered ${repoId}. Purging ${uniqueUrls.length} Camo URLs.`);
+                            
+                            for (const url of uniqueUrls) {
+                                await new Promise((resolve) => {
+                                    const req = https.request(url, { method: 'PURGE' }, () => resolve());
+                                    req.on('error', () => resolve());
+                                    req.end();
                                 });
-                                const camoRegex = /https:\/\/camo\.githubusercontent\.com\/[a-zA-Z0-9.\/?=_%:-]+/g;
-                                const uniqueUrls = [...new Set(html.match(camoRegex) || [])];
-                                console.log(`Found ${uniqueUrls.length} Camo URLs in ${repoUrl}`);
-                                for (const url of uniqueUrls) {
-                                    await new Promise((resolve) => {
-                                        const req = https.request(url, { method: 'PURGE' }, () => resolve());
-                                        req.on('error', () => resolve());
-                                        req.end();
-                                    });
-                                }
                             }
-                        } catch (e) { console.error('Error purging Camo:', e); }
+                        } catch (e) { console.error('Auto-discovery/Purge Error:', e); }
                     };
                     const svg = (l, v, c) => {
                       const lw = l.length * 8 + 14, vw = v.length * 7 + 14, tw = lw + vw;
@@ -150,10 +157,9 @@ Resources:
                       return `<svg xmlns="http://www.w3.org/2000/svg" width="${tw}" height="20" role="img" aria-label="${l}: ${v}"><linearGradient id="s" x2="0" y2="100%"><stop offset="0" stop-color="#bbb" stop-opacity=".1"/><stop offset="1" stop-opacity=".1"/></linearGradient><clipPath id="r"><rect width="${tw}" height="20" rx="3" fill="#fff"/></clipPath><g clip-path="url(#r)"><rect width="${lw}" height="20" fill="#555"/>${bg}<rect width="${tw}" height="20" fill="url(#s)"/></g><g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" text-rendering="geometricPrecision" font-size="110"><text x="${lw*5}" y="140" transform="scale(.1)" fill="#fff" textLength="${l.length*70}">${l}</text><text x="${(lw+vw/2)*10}" y="140" transform="scale(.1)" fill="#fff" textLength="${v.length*65}">${v}</text></g></svg>`;
                     };
                     exports.handler = async (e) => {
-                      console.log('Event:', JSON.stringify(e));
                       const d = e.detail, p = d.pipeline || d['project-name'], s = d.stage ? `-${d.stage}` : "", st = (d.state || d['build-status'] || 'UNKNOWN').toUpperCase();
                       const c = st === 'SUCCEEDED' ? '#4c1' : (['FAILED','STOPPED','ERROR'].includes(st) ? '#e05d44' : (['STARTED','IN_PROGRESS','RESUMED'].includes(st) ? '#dfb317' : '#979797'));
-                      await s3.send(new PutObjectCommand({ Bucket: process.env.BUCKET_BADGES, Key: `${p}${s}.svg`, Body: svg(d.pipeline ? 'pipeline' : 'build', st.toLowerCase(), c), ContentType: 'image/svg+xml', CacheControl: 'no-cache, no-store' }));
+                      await s3.send(new PutObjectCommand({ Bucket: process.env.BUCKET_BADGES, Key: `${p}/${p}${s}.svg`, Body: svg(d.pipeline ? 'pipeline' : 'build', st.toLowerCase(), c), ContentType: 'image/svg+xml', CacheControl: 'no-cache, no-store' }));
                       if (d.pipeline && d['execution-id']) {
                         try {
                           const ex = await cp.send(new GetPipelineExecutionCommand({ pipelineName: p, pipelineExecutionId: d['execution-id'] }));
@@ -173,13 +179,13 @@ Resources:
                           }
                           const common = { Bucket: process.env.BUCKET_BADGES, ContentType: 'image/svg+xml', CacheControl: 'no-cache, no-store' };
                           await Promise.all([
-                            s3.send(new PutObjectCommand({ ...common, Key: `${p}${s}-commitId.svg`, Body: svg('commit', cid, '#9f9f9f') })),
-                            s3.send(new PutObjectCommand({ ...common, Key: `${p}${s}-timestamp.svg`, Body: svg('date', t, '#007ec6') })),
-                            s3.send(new PutObjectCommand({ ...common, Key: `${p}${s}-author.svg`, Body: svg('author', a, '#fe7d37') }))
+                            s3.send(new PutObjectCommand({ ...common, Key: `${p}/${p}${s}-commitId.svg`, Body: svg('commit', cid, '#9f9f9f') })),
+                            s3.send(new PutObjectCommand({ ...common, Key: `${p}/${p}${s}-timestamp.svg`, Body: svg('date', t, '#007ec6') })),
+                            s3.send(new PutObjectCommand({ ...common, Key: `${p}/${p}${s}-author.svg`, Body: svg('author', a, '#fe7d37') }))
                           ]);
                         } catch (err) { console.error('Metadata error:', err); }
                       }
-                      await purgeCamoCache();
+                      await purgeCamoCache(p);
                       return 'Success';
                     };
 
