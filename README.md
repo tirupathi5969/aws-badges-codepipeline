@@ -40,17 +40,29 @@ aws cloudformation delete-stack \
 
 ## Using the Badges
 
-The tool automatically monitors all resources. You can add badges to your GitHub `README.md` using the following Markdown syntax:
+The tool automatically monitors all resources and generates SVGs. You can add them to your `README.md`.
 
-### For CodeBuild Projects
-```markdown
-![Build Status](https://dx-aws-pipeline-badges-images.s3.ca-central-1.amazonaws.com/<project-name>.svg)
+### Metadata Badge Paths
+The engine generates 4 types of badges for every resource:
+1. **Status**: `https://<DOMAIN>/<NAME>/<NAME>.svg`
+2. **Commit**: `https://<DOMAIN>/<NAME>/<NAME>-commitId.svg`
+3. **Timer**: `https://<DOMAIN>/<NAME>/<NAME>-timestamp.svg`
+4. **Author**: `https://<DOMAIN>/<NAME>/<NAME>-author.svg`
+
+---
+
+## 🚀 Dashboard Generator (Recommended)
+
+Instead of editing URLs manually, use the included script to generate a full CI/CD dashboard table:
+
+```bash
+bash scripts/generate-readme-table.sh <domain> <pipeline-name>
 ```
 
-### For CodePipelines
-```markdown
-![Pipeline Status](https://dx-aws-pipeline-badges-images.s3.ca-central-1.amazonaws.com/<pipeline-name>.svg)
-```
+### Example Output:
+| Stage | Activity | Current Status | Last Updated | 🔑 Commit | 👤 Author |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **01. Source** | 📡 Listener | ![Status](https://d123.cloudfront.net/my-pipeline/my-pipeline-Source.svg) | ![Time](https://d123.cloudfront.net/my-pipeline/my-pipeline-Source-timestamp.svg) | ![Commit](https://d123.cloudfront.net/my-pipeline/my-pipeline-Source-commitId.svg) | ![Author](https://d123.cloudfront.net/my-pipeline/my-pipeline-Source-author.svg) |
 
-> [!NOTE]
-> Replace `<project-name>` or `<pipeline-name>` with the exact name of your resource in AWS.
+---
+<sub>*Status badges feature live **animated progress bars** during active deployments.*</sub>

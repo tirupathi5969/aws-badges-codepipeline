@@ -164,29 +164,28 @@ Resources:
                       const st = (d.state || d['build-status'] || 'UNKNOWN').toUpperCase();
                       const isAction = type.includes('Action');
                       
-                      // 1. Update Main Status Badge (Only for Pipeline or Stage events, or Build events)
-                      // We ignore 'Action' events for the main status to avoid race conditions with 'Stage' events.
-                      if (!isAction) {
+                      // 1. Update Status Badge
+                      // Allow Pipeline/Stage/Build events. For stage-specific badges, also allow Action events for better reliability.
+                      if (!isAction || (isAction && s)) {
                         const c = st === 'SUCCEEDED' ? '#4c1' : (['FAILED','STOPPED','ERROR'].includes(st) ? '#e05d44' : (['STARTED','IN_PROGRESS','RESUMED'].includes(st) ? '#dfb317' : '#979797'));
                         await s3.send(new PutObjectCommand({ 
                           Bucket: process.env.BUCKET_BADGES, 
                           Key: `${p}/${p}${s}.svg`, 
-                          Body: svg(d.pipeline ? 'pipeline' : 'build', st.toLowerCase(), c), 
+                          Body: svg(d.pipeline ? 'pipeline' : 'build', st.toLowerCase().replace('_', ' '), c), 
                           ContentType: 'image/svg+xml', 
                           CacheControl: 'no-cache, no-store' 
                         }));
                       }
 
-                      // 2. Update Metadata (Commit/Author/Time) - Triggered by any event with execution ID
+                      // 2. Update Metadata (Commit/Author/Time)
                       if (d.pipeline && d['execution-id']) {
                         try {
-                          // Only fetch heavy metadata on SUCCEEDED or STARTED events to save API calls
+                          // Fetch metadata on completion or start
                           const ex = await cp.send(new GetPipelineExecutionCommand({ pipelineName: p, pipelineExecutionId: d['execution-id'] }));
                           const ac = await cp.send(new ListActionExecutionsCommand({ pipelineName: p, filter: { pipelineExecutionId: d['execution-id'] } }));
                           
                           let a = 'System', cid = 'N/A', t = new Date().toISOString().replace('T', ' ').split('.')[0];
                           
-                          // Extract from Pipeline Execution
                           if (ex.pipelineExecution?.artifactRevisions?.length > 0) {
                             const r = ex.pipelineExecution.artifactRevisions[0];
                             cid = r.revisionId?.substring(0, 8) || 'N/A';
@@ -196,7 +195,6 @@ Resources:
                             } catch(e) {}
                           }
                           
-                          // Extra check from Action Variables
                           const actionList = ac.actionExecutionDetails || [];
                           const src = actionList.find(x => x.stageName === 'Source' || x.actionName === 'Source');
                           if (src?.output) {
