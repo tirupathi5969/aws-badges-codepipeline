@@ -4,13 +4,11 @@ Parameters:
     AppName:
         Type: String
         Default: "dx-aws-pipeline-badges"
+    EnvironmentName:
+        Type: String
+        Default: "non-prod"
+        Description: "Deployment environment name (non-prod, prod)"
 Resources:
-    # Log Groups
-    BadgeEngineLogGroup:
-        Type: "AWS::Logs::LogGroup"
-        Properties:
-            LogGroupName: !Sub "/aws/lambda/${AppName}-engine"
-
     CloudFrontOAC:
         Type: AWS::CloudFront::OriginAccessControl
         Properties:
@@ -38,16 +36,83 @@ Resources:
                         - GET
                         - HEAD
                         - OPTIONS
-                    CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # CachingDisabled managed policy
-                    OriginRequestPolicyId: "88a5eaf4-2fd4-4709-b370-b4c650ea3fcf" # CORS-S3Origin managed policy
+                    CachePolicyId: !Ref BadgeCachePolicy
+                    OriginRequestPolicyId: !Ref BadgeOriginRequestPolicy
+                    ResponseHeadersPolicyId: !Ref BadgeResponseHeadersPolicy
                 Origins:
                     - Id: S3Origin
                       DomainName: !GetAtt BuildBadgesImagesBucket.RegionalDomainName
-                      S3OriginConfig:
-                          OriginAccessIdentity: "" # Required for S3 origins, but OAC is used instead
+                      S3OriginConfig: {}
                       OriginAccessControlId: !GetAtt CloudFrontOAC.Id
                 ViewerCertificate:
                     CloudFrontDefaultCertificate: true
+
+    # CloudFront Policies
+    BadgeCachePolicy:
+        Type: AWS::CloudFront::CachePolicy
+        Properties:
+            CachePolicyConfig:
+                Name: !Sub "${AppName}-cache-policy"
+                Comment: "Disable caching for real-time build badges"
+                DefaultTTL: 0
+                MaxTTL: 0
+                MinTTL: 0
+                ParametersInCacheKeyAndForwardedToOrigin:
+                    CookiesConfig:
+                        CookieBehavior: none
+                    HeadersConfig:
+                        HeaderBehavior: none
+                    QueryStringsConfig:
+                        QueryStringBehavior: none
+                    EnableAcceptEncodingBrotli: false
+                    EnableAcceptEncodingGzip: false
+
+    BadgeOriginRequestPolicy:
+        Type: AWS::CloudFront::OriginRequestPolicy
+        Properties:
+            OriginRequestPolicyConfig:
+                Name: !Sub "${AppName}-origin-request-policy"
+                Comment: "Pass CORS headers to S3 origin"
+                CookiesConfig:
+                    CookieBehavior: none
+                HeadersConfig:
+                    HeaderBehavior: whitelist
+                    Headers:
+                        - Origin
+                        - Access-Control-Request-Method
+                        - Access-Control-Request-Headers
+                QueryStringsConfig:
+                    QueryStringBehavior: none
+
+    BadgeResponseHeadersPolicy:
+        Type: AWS::CloudFront::ResponseHeadersPolicy
+        Properties:
+            ResponseHeadersPolicyConfig:
+                Name: !Sub "${AppName}-response-policy"
+                Comment: "CORS and Security headers for badges"
+                CorsConfig:
+                    AccessControlAllowCredentials: false
+                    AccessControlAllowHeaders:
+                        Items:
+                            - "*"
+                    AccessControlAllowMethods:
+                        Items:
+                            - GET
+                            - OPTIONS
+                    AccessControlAllowOrigins:
+                        Items:
+                            - "*"
+                    OriginOverride: true
+                SecurityHeadersConfig:
+                    FrameOptions:
+                        FrameOption: DENY
+                        Override: true
+                    ContentTypeOptions:
+                        Override: true
+                    XSSProtection:
+                        Protection: true
+                        ModeBlock: true
+                        Override: true
 
     # Roles
     IamRoleLambdaExecution:
@@ -162,25 +227,31 @@ Resources:
                       const p = d.pipeline || d['project-name'];
                       const s = d.stage ? `-${d.stage}` : "";
                       const st = (d.state || d['build-status'] || 'UNKNOWN').toUpperCase();
-                      const isAction = type.includes('Action');
+                      
+                      const isBuild = type.includes('Build');
+                      const isPipeline = type.includes('Pipeline');
+                      const isStage = type.includes('Stage');
                       
                       // 1. Update Status Badge
-                      // Allow Pipeline/Stage/Build events. For stage-specific badges, also allow Action events for better reliability.
-                      if (!isAction || (isAction && s)) {
+                      // We only process Build, Pipeline, and Stage events. 
+                      // We IGNORE 'Action' events for the status badges to prevent race conditions (especially in Source stage).
+                      if (isBuild || isPipeline || isStage) {
                         const c = st === 'SUCCEEDED' ? '#4c1' : (['FAILED','STOPPED','ERROR'].includes(st) ? '#e05d44' : (['STARTED','IN_PROGRESS','RESUMED'].includes(st) ? '#dfb317' : '#979797'));
+                        const label = d.pipeline ? (d.stage ? d.stage.toLowerCase() : 'pipeline') : 'build';
+                        
                         await s3.send(new PutObjectCommand({ 
                           Bucket: process.env.BUCKET_BADGES, 
                           Key: `${p}/${p}${s}.svg`, 
-                          Body: svg(d.pipeline ? 'pipeline' : 'build', st.toLowerCase().replace('_', ' '), c), 
+                          Body: svg(label, st.toLowerCase().replace(/_/g, ' '), c), 
                           ContentType: 'image/svg+xml', 
                           CacheControl: 'no-cache, no-store' 
                         }));
                       }
 
                       // 2. Update Metadata (Commit/Author/Time)
-                      if (d.pipeline && d['execution-id']) {
+                      // Only update metadata on Pipeline or Build completion/start to save API calls
+                      if (d.pipeline && d['execution-id'] && (isPipeline || isStage)) {
                         try {
-                          // Fetch metadata on completion or start
                           const ex = await cp.send(new GetPipelineExecutionCommand({ pipelineName: p, pipelineExecutionId: d['execution-id'] }));
                           const ac = await cp.send(new ListActionExecutionsCommand({ pipelineName: p, filter: { pipelineExecutionId: d['execution-id'] } }));
                           
@@ -256,6 +327,10 @@ Resources:
                 BlockPublicPolicy: true
                 IgnorePublicAcls: true
                 RestrictPublicBuckets: true
+            LoggingConfiguration:
+                DestinationBucketName: !ImportValue
+                    "Fn::Sub": "${EnvironmentName}-system-access-logs-storage-AccessLoggingS3Bucket"
+                LogFilePrefix: "dx-aws-pipeline-badges-log/"
             CorsConfiguration:
                 CorsRules:
                     - AllowedHeaders:
@@ -267,6 +342,22 @@ Resources:
                           - "https://github.com"
                           - "https://www.github.com"
                       MaxAge: 90
+            VersioningConfiguration:
+                Status: Enabled
+            LifecycleConfiguration:
+                Rules:
+                    - Id: GlacierRule
+                      Prefix: glacier
+                      Status: Enabled
+                      ExpirationInDays: 730
+                      Transitions:
+                          - TransitionInDays: 365
+                            StorageClass: GLACIER
+                    - Id: delete-incomplete-mpu-7days
+                      Status: Enabled
+                      Prefix: ""
+                      AbortIncompleteMultipartUpload:
+                          DaysAfterInitiation: 7
     BuildBadgesImagesBucketPolicy:
         Type: "AWS::S3::BucketPolicy"
         Properties:
@@ -283,6 +374,16 @@ Resources:
                       Condition:
                           StringEquals:
                               "AWS:SourceArn": !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${BadgesCloudFrontDistribution}"
+                    - Sid: AllowSSLRequestsOnly
+                      Effect: Deny
+                      Principal: "*"
+                      Action: "s3:*"
+                      Resource:
+                          - !Sub "arn:aws:s3:::${BuildBadgesImagesBucket}"
+                          - !Sub "arn:aws:s3:::${BuildBadgesImagesBucket}/*"
+                      Condition:
+                          Bool:
+                              "aws:SecureTransport": false
             Bucket: !Ref BuildBadgesImagesBucket
 
 Outputs:
